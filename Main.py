@@ -1,12 +1,16 @@
-"""Read packet text dumps and report IPv4/TCP headers and checksums.
+"""Read packet text dumps and report Ethernet/IPv4/TCP headers and checksums.
 
-Name: Boya Li, 
-Contact: bl7968@rit.edu, 
+Name: Boya Li, Richard Xu
+Contact: bl7968@rit.edu, rrx4700@rit.edu
 
 Sources:
 - IPv4: https://www.rfc-editor.org/rfc/rfc791
 - TCP: https://www.rfc-editor.org/rfc/rfc9293
 - Ethernet II and IEEE 802.3 framing: IEEE 802.3
+- Ethernet fields: https://wiki.wireshark.org/Ethernet
+- EtherTypes: https://www.iana.org/assignments/ieee-802-numbers/
+- LLC/SNAP: https://www.rfc-editor.org/rfc/rfc1042
+- VLAN fields: https://www.wireshark.org/docs/dfref/v/vlan.html
 """
 
 import argparse
@@ -17,6 +21,15 @@ from pathlib import Path
 
 BYTE_PATTERN = re.compile(r"\|([0-9a-fA-F]{2})(?=\|)")
 VLAN_TYPES = {0x8100, 0x88A8, 0x9100}
+ETHER_TYPES = {
+	0x0800: "IPv4",
+	0x0806: "ARP",
+	0x86DD: "IPv6",
+	0x8100: "802.1Q VLAN",
+	0x88A8: "802.1ad provider VLAN",
+	0x9100: "legacy VLAN",
+	0x88CC: "LLDP",
+}
 
 
 def read_frames(filename: Path) -> list[tuple[str, bytes]]:
@@ -37,39 +50,99 @@ def read_frames(filename: Path) -> list[tuple[str, bytes]]:
 	return frames
 
 
-def locate_network_payload(frame: bytes) -> tuple[int | None, int, str]:
-	"""Return encapsulated protocol, payload offset, and Ethernet framing details."""
+def describe_ethertype(protocol: int) -> str:
+	"""Display a protocol number even when its name is unknown."""
+	return f"0x{protocol:04x} ({ETHER_TYPES.get(protocol, 'unknown')})"
+
+
+def process_ethernet(frame: bytes) -> tuple[int | None, int, int, list[str]]:
+	"""Return protocol, payload bounds, and decoded Ethernet header fields."""
 	if len(frame) < 14:
 		raise ValueError("frame is shorter than the Ethernet header")
 
+	destination = frame[:6]
+	if destination == b"\xff" * 6:
+		delivery = "broadcast"
+	elif destination[0] & 1:
+		delivery = "multicast"
+	else:
+		delivery = "unicast"
+	lines = [
+		"  Ethernet header:",
+		f"    Destination MAC: {destination.hex(':')} ({delivery})",
+		f"    Source MAC: {frame[6:12].hex(':')}",
+	]
 	type_or_length = int.from_bytes(frame[12:14], "big")
 	payload_offset = 14
+	payload_end = len(frame)
 
-	if type_or_length <= 1500:
-		payload_end = min(payload_offset + type_or_length, len(frame))
-		payload = frame[payload_offset:payload_end]
-		framing = f"IEEE 802.3 length: {type_or_length} bytes"
-		if len(payload) >= 8 and payload[:3] == b"\xaa\xaa\x03":
-			oui = payload[3:6]
-			protocol = int.from_bytes(payload[6:8], "big")
-			if oui == b"\x00\x00\x00":
-				return protocol, payload_offset + 8, f"{framing}; SNAP EtherType 0x{protocol:04x}"
-			return None, payload_offset + 8, (
-				f"{framing}; SNAP OUI {oui.hex(':')}, protocol ID 0x{protocol:04x}"
-			)
-		return None, payload_offset, framing + "; LLC (no SNAP EtherType)"
-
-	if type_or_length < 1536:
-		return None, payload_offset, f"reserved type/length value 0x{type_or_length:04x}"
-
-	protocol = type_or_length
-	while protocol in VLAN_TYPES:
+	# Each VLAN tag adds its control field and another type/length field.
+	tag_number = 0
+	while type_or_length in VLAN_TYPES:
 		if len(frame) < payload_offset + 4:
 			raise ValueError("truncated VLAN tag")
-		protocol = int.from_bytes(frame[payload_offset + 2:payload_offset + 4], "big")
+		tag_number += 1
+		tci = int.from_bytes(frame[payload_offset:payload_offset + 2], "big")
+		lines.extend([
+			f"    VLAN tag {tag_number}: {describe_ethertype(type_or_length)}",
+			f"      TCI: 0x{tci:04x}; PCP: {tci >> 13}; "
+			f"DEI: {(tci >> 12) & 1}; VLAN ID: {tci & 0x0fff}",
+		])
+		type_or_length = int.from_bytes(
+			frame[payload_offset + 2:payload_offset + 4], "big"
+		)
 		payload_offset += 4
 
-	return protocol, payload_offset, f"EtherType: 0x{type_or_length:04x}"
+	if type_or_length <= 1500:
+		payload_end = payload_offset + type_or_length
+		if payload_end > len(frame):
+			raise ValueError("captured frame is shorter than the IEEE 802.3 length")
+		lines.extend([
+			"    Framing: IEEE 802.3",
+			f"    Length: {type_or_length} bytes (excludes padding)",
+		])
+		payload = frame[payload_offset:payload_end]
+		# Raw Novell IPX uses a length field but has no LLC header.
+		if payload[:2] == b"\xff\xff":
+			lines.append("    Encapsulation: raw IEEE 802.3 IPX (no LLC)")
+			return None, payload_offset, payload_end, lines
+		if len(payload) < 3:
+			raise ValueError("truncated IEEE 802.2 LLC header")
+		control_length = 1 if payload[2] & 3 == 3 else 2
+		llc_length = 2 + control_length
+		if len(payload) < llc_length:
+			raise ValueError("truncated IEEE 802.2 LLC control field")
+		lines.append(
+			f"    LLC: DSAP 0x{payload[0]:02x}; SSAP 0x{payload[1]:02x}; "
+			f"control 0x{payload[2:llc_length].hex()}"
+		)
+		if payload[:3] == b"\xaa\xaa\x03":
+			if len(payload) < 8:
+				raise ValueError("truncated SNAP header")
+			oui = payload[3:6]
+			protocol = int.from_bytes(payload[6:8], "big")
+			lines.append(f"    SNAP OUI: {oui.hex(':')}")
+			if oui == b"\x00\x00\x00":
+				lines.append(f"    SNAP EtherType: {describe_ethertype(protocol)}")
+				return protocol, payload_offset + 8, payload_end, lines
+			lines.append(f"    SNAP vendor protocol ID: 0x{protocol:04x}")
+			return None, payload_offset + 8, payload_end, lines
+		return None, payload_offset + llc_length, payload_end, lines
+
+	if type_or_length < 1536:
+		raise ValueError(f"reserved Ethernet type/length value {type_or_length}")
+
+	lines.extend([
+		"    Framing: Ethernet II",
+		f"    EtherType: {describe_ethertype(type_or_length)}",
+	])
+	return type_or_length, payload_offset, payload_end, lines
+
+
+def locate_network_payload(frame: bytes) -> tuple[int | None, int, str]:
+	"""Keep the original payload-locator interface for existing callers."""
+	protocol, offset, _, lines = process_ethernet(frame)
+	return protocol, offset, "; ".join(line.strip() for line in lines[3:])
 
 
 def internet_checksum(data: bytes) -> int:
@@ -194,20 +267,32 @@ def process_tcp(frame: bytes, tcp_offset: int, tcp_length: int,
 
 def process_frame(index: int, timestamp: str, frame: bytes) -> list[str]:
 	"""Process one Ethernet frame and return its report lines."""
-	protocol, payload_offset, framing = locate_network_payload(frame)
-	header = [f"Packet {index} ({timestamp})", f"  Ethernet framing: {framing}"]
+	protocol, payload_offset, payload_end, ethernet = process_ethernet(frame)
+	header = [f"Packet {index} ({timestamp})"] + ethernet
 
 	if protocol != 0x0800:
-		header.append("  IPv4/TCP processing: skipped (payload is not IPv4)")
+		reason = (describe_ethertype(protocol) if protocol is not None
+				  else "no supported IPv4 EtherType in this encapsulation")
+		header.append(f"  IPv4/TCP processing: skipped ({reason})")
 		return header
 
-	return header + process_ipv4(frame, payload_offset)
+	# Keep Ethernet padding outside an IEEE 802.3 network payload.
+	return header + process_ipv4(frame[:payload_end], payload_offset)
 
 
 def main() -> int:
 	"""Parse command-line options, process the capture, and report file errors."""
 	parser = argparse.ArgumentParser(
-		description="Display IPv4 and TCP header fields and validate their checksums."
+		description=("Display Ethernet, IPv4, and TCP header fields and "
+					 "validate IPv4/TCP checksums."),
+		epilog=("Example: python Main.py input.txt\n"
+				"Input: packet text dump with ETHER timestamps and "
+				"pipe-separated hexadecimal bytes.\n"
+				"Non-IPv4 payloads are identified and skipped. "
+				"TCP is decoded only within IPv4.\n"
+				"Exit codes: 0 = processed; 1 = empty capture or packet "
+				"errors; 2 = command-line or file error."),
+		formatter_class=argparse.RawDescriptionHelpFormatter,
 	)
 	parser.add_argument("file", nargs="?", type=Path, default=Path("input.txt"),
 						help="packet text dump (default: input.txt)")
@@ -223,15 +308,18 @@ def main() -> int:
 		return 1
 
 	print(f"Processing {len(frames)} packet(s) from {arguments.file}...\n")
+	failed = 0
 	for index, (timestamp, frame) in enumerate(frames, start=1):
 		try:
 			report = process_frame(index, timestamp, frame)
 		except (ValueError, ipaddress.AddressValueError) as error:
+			failed += 1
 			report = [f"Packet {index} ({timestamp})", f"  Could not process packet: {error}"]
 		print("\n".join(report))
 		print()
 
-	return 0
+	print(f"Finished: {len(frames)} packet(s), {failed} processing error(s).")
+	return 1 if failed else 0
 
 
 if __name__ == "__main__":
