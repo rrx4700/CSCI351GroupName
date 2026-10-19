@@ -285,10 +285,10 @@ def main() -> int:
 		formatter_class=argparse.RawDescriptionHelpFormatter,
 	)
 	parser.add_argument("file", nargs="?", type=Path,
-						help="packet text dump (default: input.txt)")
+						help="packet text dump")
 	arguments = parser.parse_args()
 	# if no files passed in
-	if arguments.file == None:
+	if arguments.file is None:
 		parser.error("Please Pass in Argument For What Input File to Parse")
 	try:
 		frames = read_frames(arguments.file)
