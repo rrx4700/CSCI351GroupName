@@ -1,7 +1,7 @@
 """Read packet text dumps and report Ethernet/IPv4/TCP headers and checksums.
 
-Name: Boya Li, Richard Xu
-Contact: bl7968@rit.edu, rrx4700@rit.edu
+Name: Boya Li, Richard Xu, Emile Racquet
+Contact: bl7968@rit.edu, rrx4700@rit.edu, er8033@rit.edu
 
 Sources:
 - IPv4: https://www.rfc-editor.org/rfc/rfc791
@@ -11,12 +11,16 @@ Sources:
 - EtherTypes: https://www.iana.org/assignments/ieee-802-numbers/
 - LLC/SNAP: https://www.rfc-editor.org/rfc/rfc1042
 - VLAN fields: https://www.wireshark.org/docs/dfref/v/vlan.html
+- Checksum sources (RFC 1071, RFC 791, RFC 9293, and others) are listed
+  in checksum.py, which performs the IPv4 and TCP checksum calculations.
 """
 
 import argparse
 import ipaddress
 import re
 from pathlib import Path
+
+import checksum
 
 
 BYTE_PATTERN = re.compile(r"\|([0-9a-fA-F]{2})(?=\|)")
@@ -145,26 +149,8 @@ def locate_network_payload(frame: bytes) -> tuple[int | None, int, str]:
 	return protocol, offset, "; ".join(line.strip() for line in lines[3:])
 
 
-def internet_checksum(data: bytes) -> int:
-	"""Calculate the 16-bit one's-complement Internet checksum."""
-	if len(data) % 2:
-		data += b"\x00"
-
-	total = sum(int.from_bytes(data[index:index + 2], "big")
-				for index in range(0, len(data), 2))
-	while total >> 16:
-		total = (total & 0xffff) + (total >> 16)
-	return (~total) & 0xffff
-
-
-def checksum_result(actual: int, calculated: int) -> str:
-	"""Format a checksum comparison for display."""
-	result = "valid" if actual == calculated else "INVALID"
-	return f"0x{actual:04x} (calculated 0x{calculated:04x}: {result})"
-
-
-def process_ipv4(frame: bytes, ip_offset: int) -> list[str]:
-	"""Decode IPv4 fields, validate its header checksum, and decode TCP if present."""
+def process_ipv4(frame: bytes, ip_offset: int) -> tuple[list[str], list[str]]:
+	"""Decode IPv4 (and TCP) fields; return them and the checksum report."""
 	if len(frame) < ip_offset + 20:
 		raise ValueError("truncated IPv4 header")
 
@@ -183,9 +169,10 @@ def process_ipv4(frame: bytes, ip_offset: int) -> list[str]:
 	if len(frame) < ip_end:
 		raise ValueError("captured frame is shorter than the IPv4 total length")
 
+	# The IPv4 checksum covers the full header, including any options.
 	ip_header = frame[ip_offset:ip_offset + header_length]
-	actual_ip_checksum = int.from_bytes(ip_header[10:12], "big")
-	calculated_ip_checksum = internet_checksum(ip_header[:10] + b"\x00\x00" + ip_header[12:])
+	ip_check = checksum.check_ipv4_header(ip_header)
+	checks = ip_check.report_lines()
 
 	flags_and_offset = int.from_bytes(frame[ip_offset + 6:ip_offset + 8], "big")
 	fragment_offset = flags_and_offset & 0x1fff
@@ -204,7 +191,7 @@ def process_ipv4(frame: bytes, ip_offset: int) -> list[str]:
 		f"    Flags: 0x{flags_and_offset >> 13:01x}; fragment offset: {fragment_offset}",
 		f"    TTL: {frame[ip_offset + 8]}",
 		f"    Protocol: {protocol} ({'TCP' if protocol == 6 else 'not TCP'})",
-		f"    Header checksum: {checksum_result(actual_ip_checksum, calculated_ip_checksum)}",
+		f"    Header checksum: 0x{ip_check.actual:04x}",
 		f"    Source: {source_ip}",
 		f"    Destination: {destination_ip}",
 	]
@@ -212,18 +199,23 @@ def process_ipv4(frame: bytes, ip_offset: int) -> list[str]:
 	if protocol == 6:
 		tcp_offset = ip_offset + header_length
 		tcp_length = total_length - header_length
-		lines.extend(process_tcp(frame, tcp_offset, tcp_length, source_ip,
-								 destination_ip, fragment_offset, more_fragments))
+		tcp_lines, tcp_checks = process_tcp(
+			frame, tcp_offset, tcp_length, ip_header[12:16], ip_header[16:20],
+			fragment_offset, more_fragments)
+		lines.extend(tcp_lines)
+		checks.extend(tcp_checks)
 
-	return lines
+	return lines, checks
 
 
 def process_tcp(frame: bytes, tcp_offset: int, tcp_length: int,
-				source_ip: str, destination_ip: str,
-				fragment_offset: int, more_fragments: bool) -> list[str]:
-	"""Decode TCP fields and validate its pseudoheader-based checksum when possible."""
+				source_ip: bytes, destination_ip: bytes,
+				fragment_offset: int,
+				more_fragments: bool) -> tuple[list[str], list[str]]:
+	"""Decode TCP fields; return them and the TCP checksum report."""
 	if fragment_offset:
-		return ["  TCP header: not present in this non-initial IPv4 fragment"]
+		return (["  TCP header: not present in this non-initial IPv4 fragment"],
+				[])
 	if tcp_length < 20 or len(frame) < tcp_offset + 20:
 		raise ValueError("truncated TCP header")
 
@@ -249,20 +241,16 @@ def process_tcp(frame: bytes, tcp_offset: int, tcp_length: int,
 		f"    Urgent pointer: {int.from_bytes(frame[tcp_offset + 18:tcp_offset + 20], 'big')}",
 	]
 
+	# The TCP checksum needs the whole segment, which a fragment lacks.
 	if more_fragments:
-		lines.append("    Checksum validation: unavailable (IPv4 datagram is fragmented)")
+		checks = ["    TCP checksum (RFC 9293):",
+				  f"      {'Result:':<24}not calculated "
+				  "(IPv4 datagram is fragmented)"]
 	else:
-		pseudo_header = (
-			ipaddress.IPv4Address(source_ip).packed
-			+ ipaddress.IPv4Address(destination_ip).packed
-			+ b"\x00\x06"
-			+ tcp_length.to_bytes(2, "big")
-		)
-		segment_for_checksum = segment[:16] + b"\x00\x00" + segment[18:]
-		calculated_checksum = internet_checksum(pseudo_header + segment_for_checksum)
-		lines.append(f"    Checksum validation: {checksum_result(actual_checksum, calculated_checksum)}")
+		checks = checksum.check_tcp_segment(
+			source_ip, destination_ip, segment).report_lines()
 
-	return lines
+	return lines, checks
 
 
 def process_frame(index: int, timestamp: str, frame: bytes) -> list[str]:
@@ -277,7 +265,9 @@ def process_frame(index: int, timestamp: str, frame: bytes) -> list[str]:
 		return header
 
 	# Keep Ethernet padding outside an IEEE 802.3 network payload.
-	return header + process_ipv4(frame[:payload_end], payload_offset)
+	ip_lines, checks = process_ipv4(frame[:payload_end], payload_offset)
+	# Header fields first, followed by the checksum calculations.
+	return header + ip_lines + ["  Checksum calculations:"] + checks
 
 
 def main() -> int:

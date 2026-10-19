@@ -68,7 +68,8 @@ class PacketTests(unittest.TestCase):
                 protocol, actual_offset, _, _ = Main.process_ethernet(frame)
                 self.assertEqual((protocol, actual_offset), (0x0800, offset))
                 report = "\n".join(Main.process_frame(1, "test", frame))
-                self.assertEqual(report.count(": valid)"), 2)
+                self.assertEqual(report.count(
+                    "valid (field matches calculated value)"), 2)
         report = "\n".join(Main.process_frame(
             1, "test", self.encapsulations()[1]))
         self.assertIn("PCP: 5; DEI: 1; VLAN ID: 37", report)
@@ -160,8 +161,9 @@ class PacketTests(unittest.TestCase):
             for checksum, status in ((row[4], row[5]), (row[6], row[7])):
                 if checksum:
                     self.assertEqual(status, "1")  # Wireshark: Good
-                    self.assertIn(
-                        f"{checksum} (calculated {checksum}: valid)", report)
+                    self.assertRegex(
+                        report, rf"Value in header field:\s+{checksum}\n"
+                        rf"\s+Calculated value:\s+{checksum}\n")
 
         variants = self.encapsulations()
         bad_ip = bytearray(self.tcp)

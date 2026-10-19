@@ -49,12 +49,30 @@ Checksum status `1` means good and `0` means bad. In the Wireshark GUI, open
 `input.txt`, enable checksum validation in the IPv4 and TCP protocol
 preferences, and expand the Ethernet, IPv4, and TCP trees to inspect fields.
 
-Sources used for Ethernet parsing:
+## Sources
 
-- [Wireshark Ethernet field descriptions](https://wiki.wireshark.org/Ethernet)
-- [IANA EtherType registry](https://www.iana.org/assignments/ieee-802-numbers/)
+Protocol specifications:
+
+- [RFC 791: Internet Protocol (IPv4 header and header checksum)](https://www.rfc-editor.org/rfc/rfc791)
+- [RFC 9293: Transmission Control Protocol (TCP header, checksum, pseudo-header)](https://www.rfc-editor.org/rfc/rfc9293)
+- [RFC 1071: Computing the Internet Checksum](https://www.rfc-editor.org/rfc/rfc1071)
 - [RFC 1042: LLC/SNAP encapsulation](https://www.rfc-editor.org/rfc/rfc1042)
+- IEEE 802.3 (Ethernet II and IEEE 802.3 framing)
+
+Registries and reference material:
+
+- [IANA EtherType registry](https://www.iana.org/assignments/ieee-802-numbers/)
+- [IANA protocol numbers (TCP = 6)](https://www.iana.org/assignments/protocol-numbers/)
+- [Wireshark Ethernet field descriptions](https://wiki.wireshark.org/Ethernet)
 - [Wireshark VLAN fields](https://www.wireshark.org/docs/dfref/v/vlan.html)
 - [TShark command reference](https://www.wireshark.org/docs/man-pages/tshark.html)
+- [Checksum video linked in the assignment](https://www.youtube.com/watch?v=7LniwyiH0SM)
 
-The IPv4/TCP sources are retained in the `Main.py` module docstring.
+Python documentation (standard library only):
+
+- [`int.from_bytes` / `int.to_bytes`](https://docs.python.org/3/library/stdtypes.html#int.from_bytes)
+- [`argparse`](https://docs.python.org/3/library/argparse.html)
+- [`re`](https://docs.python.org/3/library/re.html)
+- [`pathlib`](https://docs.python.org/3/library/pathlib.html)
+- [`ipaddress`](https://docs.python.org/3/library/ipaddress.html)
+- [`unittest`](https://docs.python.org/3/library/unittest.html)
