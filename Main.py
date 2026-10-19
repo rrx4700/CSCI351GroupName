@@ -1,7 +1,7 @@
 """Read packet text dumps and report Ethernet/IPv4/TCP headers and checksums.
 
-Name: Boya Li, Richard Xu, Emile Racquet
-Contact: bl7968@rit.edu, rrx4700@rit.edu, er8033@rit.edu
+Name: Boya Li, Richard Xu, Emile Racquet, Ekam Ghai
+Contact: bl7968@rit.edu, rrx4700@rit.edu, er8033@rit.edu, esg8275@rit.edu
 
 Sources:
 - IPv4: https://www.rfc-editor.org/rfc/rfc791
@@ -284,10 +284,12 @@ def main() -> int:
 				"errors; 2 = command-line or file error."),
 		formatter_class=argparse.RawDescriptionHelpFormatter,
 	)
-	parser.add_argument("file", nargs="?", type=Path, default=Path("input.txt"),
+	parser.add_argument("file", nargs="?", type=Path,
 						help="packet text dump (default: input.txt)")
 	arguments = parser.parse_args()
-
+	# if no files passed in
+	if arguments.file == None:
+		parser.error("Please Pass in Argument For What Input File to Parse")
 	try:
 		frames = read_frames(arguments.file)
 	except (OSError, UnicodeError) as error:
