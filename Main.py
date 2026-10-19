@@ -37,21 +37,29 @@ ETHER_TYPES = {
 
 
 def read_frames(filename: Path) -> list[tuple[str, bytes]]:
-	"""Read byte rows from the text capture, retaining each frame timestamp."""
-	frames = []
-	timestamp = "unknown"
+    """Read byte rows from the text capture, retaining each frame timestamp."""
+    frames = []
+    current_timestamp = "unknown"
+    current_bytes = bytearray()
 
-	with filename.open("r", encoding="utf-8") as capture_file:
-		for line in capture_file:
-			if "ETHER" in line:
-				timestamp = line.split("ETHER", maxsplit=1)[0].strip()
-				continue
+    with filename.open("r", encoding="utf-8") as capture_file:
+        for line in capture_file:
+            if "ETHER" in line:
+                if current_bytes:
+                    frames.append((current_timestamp, bytes(current_bytes)))
+                    current_bytes.clear()
+                current_timestamp = line.split("ETHER", maxsplit=1)[0].strip()
+                continue
 
-			byte_values = BYTE_PATTERN.findall(line)
-			if byte_values:
-				frames.append((timestamp, bytes(int(value, 16) for value in byte_values)))
+            byte_values = BYTE_PATTERN.findall(line)
+            if byte_values:
+                current_bytes.extend(int(value, 16) for value in byte_values)
 
-	return frames
+        if current_bytes:
+            frames.append((current_timestamp, bytes(current_bytes)))
+
+    return frames
+
 
 
 def describe_ethertype(protocol: int) -> str:
