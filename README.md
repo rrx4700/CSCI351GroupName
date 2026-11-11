@@ -15,9 +15,13 @@ timestamp lines and one pipe-separated hexadecimal byte row per packet.
 The Ethernet report displays destination/source MAC addresses, destination
 delivery type, and EtherType or IEEE 802.3 length. It also decodes VLAN tags
 (including stacked tags) and LLC/SNAP fields. IPv4 payloads are passed to the
-existing IPv4/TCP parser; ARP, IPv6, unknown EtherTypes, and unsupported LLC/SNAP
-protocols are identified and skipped. IEEE 802.3 padding is excluded from IP
-processing. Short headers and inconsistent lengths are reported as errors.
+existing IPv4/TCP parser; IPv6 base headers are recognized and length-checked
+without decoding their full contents. Each packet also exposes a `PacketRecord`
+with its timestamp, L2/L3/L4 protocol classifications, and L3 size where
+available. ARP, unknown EtherTypes, and unsupported LLC/SNAP protocols are
+identified without entering the IPv4 parser. IEEE 802.3 padding is excluded
+from IP processing. Short headers and inconsistent lengths are reported as
+errors.
 
 The program prints a packet count at startup and an error count at completion.
 Exit status is 0 after processing, 1 for an empty capture or malformed packet,
@@ -31,13 +35,11 @@ Run the tests:
 python -B -m unittest -v test_main
 ```
 
-Seven tests passed, including comparison against Wireshark's TShark with IP
-and TCP checksum verification enabled. All 18 sample packets' MAC addresses
-and type/length fields matched; all 9 IPv4 and 6 TCP checksums were valid in
-both programs. Tests also cover VLAN/stacked VLAN and SNAP encapsulation,
-non-IPv4 dispatch, malformed headers, padding boundaries, help/file errors,
-and deliberately corrupted IPv4/TCP checksums. The Wireshark comparison is
-skipped when TShark is not installed; the parser itself never requires it.
+Tests cover VLAN/stacked VLAN and SNAP encapsulation, protocol classification
+and packet metadata, non-IPv4 dispatch, malformed headers, padding boundaries,
+help/file errors, and deliberately corrupted IPv4/TCP checksums. The Wireshark
+comparison is skipped when TShark is not installed; the parser itself never
+requires it.
 
 To repeat the sample comparison in PowerShell with Wireshark installed:
 

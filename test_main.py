@@ -1,5 +1,6 @@
 """Standard-library tests; use installed TShark for independent checks."""
 
+from collections import Counter
 import csv
 import io
 from pathlib import Path
@@ -48,6 +49,37 @@ class PacketTests(unittest.TestCase):
         self.assertIn("IPv6", reports[16])
         self.assertIn("multicast", reports[16])
 
+    def test_packet_metadata(self):
+        """Expose timestamps, protocol classifications, and network sizes."""
+        records = [
+            Main.process_packet(index, timestamp, frame)[0]
+            for index, (timestamp, frame) in enumerate(self.frames, 1)
+        ]
+        self.assertEqual(records[0].timestamp, self.frames[0][0])
+        self.assertEqual(
+            Counter(record.l2_protocol for record in records),
+            {"Ethernet II": 14, "IEEE 802.3": 4},
+        )
+        self.assertEqual(
+            Counter(record.l3_protocol for record in records
+                    if record.l3_protocol is not None),
+            {"IPv4": 9, "ARP": 3, "IPv6": 2},
+        )
+        self.assertEqual(
+            Counter(record.l4_protocol for record in records
+                    if record.l4_protocol is not None),
+            {"TCP": 6, "ICMP": 2, "IGMP": 1},
+        )
+        self.assertEqual(records[0].l3_size, 28)
+        self.assertTrue(all(
+            record.l3_size is not None and record.l3_size >= 40
+            for record in records if record.l3_protocol == "IPv6"
+        ))
+        self.assertTrue(all(
+            record.l3_size is None
+            for record in records if record.l2_protocol == "IEEE 802.3"
+        ))
+
     def encapsulations(self):
         """Wrap an unchanged IP/TCP packet in different Ethernet headers."""
         macs, ip = self.tcp[:12], self.tcp[14:]
@@ -63,10 +95,17 @@ class PacketTests(unittest.TestCase):
 
     def test_encapsulations(self):
         """VLAN and SNAP offsets preserve valid IPv4/TCP checksums."""
-        for frame, offset in zip(self.encapsulations(), [14, 18, 22, 22, 26]):
+        expected_l2 = [
+            "Ethernet II", "Ethernet II", "Ethernet II",
+            "IEEE 802.3", "IEEE 802.3",
+        ]
+        for frame, offset, l2_protocol in zip(
+                self.encapsulations(), [14, 18, 22, 22, 26], expected_l2):
             with self.subTest(offset=offset, header=frame[:26].hex()):
                 protocol, actual_offset, _, _ = Main.process_ethernet(frame)
                 self.assertEqual((protocol, actual_offset), (0x0800, offset))
+                record, _ = Main.process_packet(1, "test", frame)
+                self.assertEqual(record.l2_protocol, l2_protocol)
                 report = "\n".join(Main.process_frame(1, "test", frame))
                 self.assertEqual(report.count(
                     "valid (field matches calculated value)"), 2)
@@ -75,12 +114,21 @@ class PacketTests(unittest.TestCase):
         self.assertIn("PCP: 5; DEI: 1; VLAN ID: 37", report)
 
     def test_non_ipv4(self):
-        """Unknown EtherTypes and vendor SNAP IDs never enter IPv4."""
-        for kind in (0x0806, 0x86DD, 0x88B5):
-            frame = self.tcp[:12] + kind.to_bytes(2, "big") + self.tcp[14:]
+        """Recognize IPv6 without dispatching it to the IPv4 parser."""
+        ipv6 = (self.tcp[:12] + bytes.fromhex("86dd")
+                + bytes.fromhex("6000000000003b40")
+                + bytes(32))
+        for frame in (
+                self.tcp[:12] + bytes.fromhex("0806") + self.tcp[14:],
+                ipv6,
+                self.tcp[:12] + bytes.fromhex("88b5") + self.tcp[14:]):
             report = "\n".join(Main.process_frame(1, "test", frame))
-            self.assertIn("skipped", report)
             self.assertNotIn("IPv4 header:", report)
+        ipv6_record, ipv6_report = Main.process_packet(1, "test", ipv6)
+        self.assertEqual(ipv6_record.l3_protocol, "IPv6")
+        self.assertEqual(ipv6_record.l3_size, 40)
+        self.assertIn("IPv6 packet (recognized", "\n".join(ipv6_report))
+        self.assertIsNone(ipv6_record.l4_protocol)
         payload = bytes.fromhex("aaaa0300000c0800") + self.tcp[14:]
         frame = self.tcp[:12] + len(payload).to_bytes(2, "big") + payload
         self.assertIsNone(Main.process_ethernet(frame)[0])
@@ -100,6 +148,9 @@ class PacketTests(unittest.TestCase):
             with self.subTest(frame=frame.hex()):
                 with self.assertRaises(ValueError):
                     Main.process_ethernet(frame)
+        truncated_ipv6 = self.tcp[:12] + bytes.fromhex("86dd") + bytes(20)
+        with self.assertRaisesRegex(ValueError, "truncated IPv6 header"):
+            Main.process_packet(1, "test", truncated_ipv6)
 
     def test_snap_padding_is_not_ip_payload(self):
         """Padding cannot make an IP packet exceed its 802.3 length."""

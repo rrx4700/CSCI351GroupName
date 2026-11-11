@@ -18,6 +18,7 @@ Sources:
 import argparse
 import ipaddress
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import checksum
@@ -34,6 +35,41 @@ ETHER_TYPES = {
 	0x9100: "legacy VLAN",
 	0x88CC: "LLDP",
 }
+IP_PROTOCOLS = {
+	1: "ICMP",
+	2: "IGMP",
+	6: "TCP",
+	17: "UDP",
+	41: "IPv6 encapsulation",
+	47: "GRE",
+	50: "ESP",
+	51: "AH",
+	58: "ICMPv6",
+	89: "OSPF",
+	132: "SCTP",
+}
+IPV6_EXTENSION_HEADERS = {
+	0: "Hop-by-Hop Options",
+	43: "Routing",
+	44: "Fragment",
+	51: "Authentication",
+	60: "Destination Options",
+	135: "Mobility",
+	139: "HIP",
+	140: "Shim6",
+}
+IPV6_NO_NEXT_HEADER = 59
+
+
+@dataclass(frozen=True)
+class PacketRecord:
+	"""Protocol and size metadata for one captured packet."""
+
+	timestamp: str
+	l2_protocol: str
+	l3_protocol: str | None
+	l4_protocol: str | None
+	l3_size: int | None
 
 
 def read_frames(filename: Path) -> list[tuple[str, bytes]]:
@@ -65,6 +101,11 @@ def read_frames(filename: Path) -> list[tuple[str, bytes]]:
 def describe_ethertype(protocol: int) -> str:
 	"""Display a protocol number even when its name is unknown."""
 	return f"0x{protocol:04x} ({ETHER_TYPES.get(protocol, 'unknown')})"
+
+
+def describe_ip_protocol(protocol: int) -> str:
+	"""Return a readable name for an IP protocol or next-header number."""
+	return IP_PROTOCOLS.get(protocol, f"IP protocol {protocol}")
 
 
 def process_ethernet(frame: bytes) -> tuple[int | None, int, int, list[str]]:
@@ -198,7 +239,7 @@ def process_ipv4(frame: bytes, ip_offset: int) -> tuple[list[str], list[str]]:
 		f"    Identification: 0x{int.from_bytes(frame[ip_offset + 4:ip_offset + 6], 'big'):04x}",
 		f"    Flags: 0x{flags_and_offset >> 13:01x}; fragment offset: {fragment_offset}",
 		f"    TTL: {frame[ip_offset + 8]}",
-		f"    Protocol: {protocol} ({'TCP' if protocol == 6 else 'not TCP'})",
+		f"    Protocol: {protocol} ({describe_ip_protocol(protocol)})",
 		f"    Header checksum: 0x{ip_check.actual:04x}",
 		f"    Source: {source_ip}",
 		f"    Destination: {destination_ip}",
@@ -261,21 +302,99 @@ def process_tcp(frame: bytes, tcp_offset: int, tcp_length: int,
 	return lines, checks
 
 
-def process_frame(index: int, timestamp: str, frame: bytes) -> list[str]:
-	"""Process one Ethernet frame and return its report lines."""
+def process_ipv6(frame: bytes, ip_offset: int, payload_end: int
+				 ) -> tuple[list[str], int, int]:
+	"""Validate an IPv6 base header and return its size and Next Header value."""
+	if payload_end < ip_offset + 40:
+		raise ValueError("truncated IPv6 header")
+
+	version = frame[ip_offset] >> 4
+	if version != 6:
+		raise ValueError(f"expected IPv6, found IP version {version}")
+	payload_length = int.from_bytes(frame[ip_offset + 4:ip_offset + 6], "big")
+	ip_length = 40 + payload_length
+	if ip_offset + ip_length > payload_end:
+		raise ValueError("captured frame is shorter than the IPv6 payload length")
+
+	next_header = frame[ip_offset + 6]
+	next_header_name = describe_ip_protocol(next_header)
+	if next_header in IPV6_EXTENSION_HEADERS:
+		next_header_name = IPV6_EXTENSION_HEADERS[next_header]
+	elif next_header == IPV6_NO_NEXT_HEADER:
+		next_header_name = "No Next Header"
+	lines = [
+		"  IPv6 packet (recognized; header details not required):",
+		f"    Payload length: {payload_length} bytes",
+		f"    Next header: {next_header} ({next_header_name})",
+	]
+	return lines, ip_length, next_header
+
+
+def process_packet(index: int, timestamp: str, frame: bytes
+				   ) -> tuple[PacketRecord, list[str]]:
+	"""Return packet metadata and display lines for one Ethernet frame."""
 	protocol, payload_offset, payload_end, ethernet = process_ethernet(frame)
+	type_or_length = int.from_bytes(frame[12:14], "big")
+	tag_offset = 14
+	while type_or_length in VLAN_TYPES:
+		type_or_length = int.from_bytes(
+			frame[tag_offset + 2:tag_offset + 4], "big")
+		tag_offset += 4
+	l2_protocol = "IEEE 802.3" if type_or_length <= 1500 else "Ethernet II"
+	l3_protocol = (
+		ETHER_TYPES.get(protocol, f"EtherType 0x{protocol:04x}")
+		if protocol is not None else None
+	)
+	l4_protocol = None
+	l3_size = None
 	header = [f"Packet {index} ({timestamp})"] + ethernet
 
-	if protocol != 0x0800:
-		reason = (describe_ethertype(protocol) if protocol is not None
-				  else "no supported IPv4 EtherType in this encapsulation")
-		header.append(f"  IPv4/TCP processing: skipped ({reason})")
-		return header
+	if protocol == 0x0800:
+		# Keep Ethernet padding outside the network-layer payload.
+		ip_frame = frame[:payload_end]
+		ip_lines, checks = process_ipv4(ip_frame, payload_offset)
+		ip_protocol = ip_frame[payload_offset + 9]
+		l4_protocol = describe_ip_protocol(ip_protocol)
+		l3_size = int.from_bytes(
+			ip_frame[payload_offset + 2:payload_offset + 4], "big")
+		header.extend(ip_lines)
+		header.extend(["  Checksum calculations:"] + checks)
+	elif protocol == 0x86DD:
+		ipv6_lines, l3_size, next_header = process_ipv6(
+			frame, payload_offset, payload_end)
+		l3_protocol = "IPv6"
+		if (next_header not in IPV6_EXTENSION_HEADERS
+				and next_header != IPV6_NO_NEXT_HEADER):
+			l4_protocol = describe_ip_protocol(next_header)
+		header.extend(ipv6_lines)
+	elif protocol is not None:
+		header.append(
+			f"  IPv4/TCP processing: skipped ({describe_ethertype(protocol)})")
+	else:
+		header.append("  IPv4/TCP processing: skipped "
+					  "(no supported IP EtherType in this encapsulation)")
 
-	# Keep Ethernet padding outside an IEEE 802.3 network payload.
-	ip_lines, checks = process_ipv4(frame[:payload_end], payload_offset)
-	# Header fields first, followed by the checksum calculations.
-	return header + ip_lines + ["  Checksum calculations:"] + checks
+	record = PacketRecord(
+		timestamp=timestamp,
+		l2_protocol=l2_protocol,
+		l3_protocol=l3_protocol,
+		l4_protocol=l4_protocol,
+		l3_size=l3_size,
+	)
+	header.append(
+		"  Packet classification: "
+		f"L2={record.l2_protocol}; "
+		f"L3={record.l3_protocol or 'not identified'}; "
+		f"L4={record.l4_protocol or 'not identified'}; "
+		f"L3 size={record.l3_size if record.l3_size is not None else 'N/A'}"
+	)
+	return record, header
+
+
+def process_frame(index: int, timestamp: str, frame: bytes) -> list[str]:
+	"""Process one Ethernet frame and return its report lines."""
+	_, lines = process_packet(index, timestamp, frame)
+	return lines
 
 
 def main() -> int:
@@ -311,7 +430,7 @@ def main() -> int:
 	failed = 0
 	for index, (timestamp, frame) in enumerate(frames, start=1):
 		try:
-			report = process_frame(index, timestamp, frame)
+			_, report = process_packet(index, timestamp, frame)
 		except (ValueError, ipaddress.AddressValueError) as error:
 			failed += 1
 			report = [f"Packet {index} ({timestamp})", f"  Could not process packet: {error}"]
