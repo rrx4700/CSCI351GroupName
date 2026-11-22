@@ -17,8 +17,8 @@ from pathlib import Path
 import Main
 import packet_stats
 
-# TODO: Import the GUI/Graphing module once it's built
-# import graph_ui
+# graph_ui (matplotlib) is imported only when graphs are requested, so the
+# rest of the pipeline still runs with just the standard library.
 
 
 def export_to_json(stats, output_path: Path):
@@ -30,13 +30,18 @@ def export_to_json(stats, output_path: Path):
     print(f"\n[+] Successfully exported statistics to {output_path}")
 
 
-def launch_graph_ui(stats):
-    """TODO: Build and integrate the graphical UI for Phase 2."""
-    print("\n[TODO] Graph UI is not yet implemented.")
-    print("       - Need to build bar charts for protocol counts.")
-    print("       - Need to build histograms for L3 packet sizes.")
-    print("       - Need to build line graphs for packets per second.")
-    # graph_ui.display_dashboard(stats)
+def launch_graph_ui(stats, save_dir=None, show=True):
+    """Draw the Phase 2 graphs: protocol bar charts, L3 size histogram,
+    and packets-per-second line graph (see graph_ui.py)."""
+    try:
+        import matplotlib  # noqa: F401  (graph_ui loads it lazily)
+        import graph_ui
+    except ImportError as error:
+        print(f"\n[-] Graphs need matplotlib ({error}). "
+              "Install it with: pip install matplotlib", file=sys.stderr)
+        return
+    print("\n[*] Drawing graphs...")
+    graph_ui.display_dashboard(stats, save_dir=save_dir, show=show)
 
 
 def main() -> int:
@@ -46,8 +51,10 @@ def main() -> int:
     parser.add_argument("file", type=Path, help="Path to the packet text dump file")
     parser.add_argument("--export-json", type=Path, metavar="FILE", 
                         help="Export the converted statistics to a JSON file")
-    parser.add_argument("--ui", action="store_true", 
-                        help="Launch the graph UI (Not yet implemented)")
+    parser.add_argument("--ui", action="store_true",
+                        help="Open the graph window (requires matplotlib)")
+    parser.add_argument("--save-graphs", type=Path, metavar="DIR",
+                        help="Save each graph as a PNG in DIR")
     
     args = parser.parse_args()
 
@@ -97,9 +104,9 @@ def main() -> int:
     if args.export_json:
         export_to_json(stats, args.export_json)
 
-    # 5. LAUNCH UI (TODO)
-    if args.ui:
-        launch_graph_ui(stats)
+    # 5. GRAPHS
+    if args.ui or args.save_graphs:
+        launch_graph_ui(stats, save_dir=args.save_graphs, show=args.ui)
 
     return 1 if failed else 0
 

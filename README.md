@@ -51,6 +51,22 @@ Checksum status `1` means good and `0` means bad. In the Wireshark GUI, open
 `input.txt`, enable checksum validation in the IPv4 and TCP protocol
 preferences, and expand the Ethernet, IPv4, and TCP trees to inspect fields.
 
+## Graphs (Phase 2)
+
+`graph_ui.py` draws the statistics with matplotlib (`pip install matplotlib`):
+bar charts of L2/L3/L4 protocol counts, a histogram of L3 packet sizes, and a
+line graph of packets per second over the first 10 seconds.
+
+```text
+python main2.py input.txt --ui                    # open the graph window
+python main2.py input.txt --save-graphs graphs    # write PNGs to ./graphs
+python graph_ui.py input.txt --save graphs --no-show
+python -B -m unittest -v test_graph_ui
+```
+
+Matplotlib is only needed for the graphs; the parser and statistics modules
+still use the standard library alone.
+
 ## Sources
 
 Protocol specifications:
@@ -78,3 +94,4 @@ Python documentation (standard library only):
 - [`pathlib`](https://docs.python.org/3/library/pathlib.html)
 - [`ipaddress`](https://docs.python.org/3/library/ipaddress.html)
 - [`unittest`](https://docs.python.org/3/library/unittest.html)
+- [Matplotlib documentation](https://matplotlib.org/stable/)
